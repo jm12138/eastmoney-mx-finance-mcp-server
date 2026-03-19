@@ -69,7 +69,7 @@ eastmoney-mx-finance-mcp-server stdio
 
 请按你的客户端配置格式写入命令和环境变量。核心是：
 
-- 启动命令：`python C:/Users/Xpk22/Desktop/code/mx_mcp_server/server.py`
+- 启动命令：`python server.py`
 - 环境变量：至少包含 `MX_APIKEY`
 
 ## 5. 返回约定
