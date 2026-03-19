@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 from typing import Any
 
@@ -78,7 +79,7 @@ def _get_apikey() -> str:
 
 
 def _get_base_url() -> str:
-    return (os.getenv("MX_API_URL") or os.getenv("MX_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+    return os.getenv("MX_API_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
 def _extract_status_code(body: dict[str, Any]) -> int | None:
@@ -515,10 +516,20 @@ def mx_price_restore(price: float, priceDec: int) -> dict[str, float | int]:
 
 
 def main() -> None:
-    mcp.run(transport="sse")
+    mode = "sse"
+    if len(sys.argv) > 1:
+        mode = sys.argv[1].strip().lower()
+
+    if mode not in {"sse", "stdio"}:
+        raise ValueError("Usage: eastmoney-mx-finance-mcp-server [sse|stdio]")
+
+    mcp.run(transport=mode)
 
 
 if __name__ == "__main__":
     main()
+
+
+
 
 

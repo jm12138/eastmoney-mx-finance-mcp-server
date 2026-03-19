@@ -1,4 +1,4 @@
-# eastmoney-mx-finance-mcp-server (SSE)
+# eastmoney-mx-finance-mcp-server
 
 基于 [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) 实现的东方财富·妙想（MX）金融 MCP 服务端。
 
@@ -37,8 +37,6 @@ $env:MX_APIKEY="你的apikey"
 
 # 可选：MX API 地址
 $env:MX_API_URL="https://mkapi2.dfcfs.com/finskillshub/api/claw"
-# 兼容旧变量名
-# $env:MX_BASE_URL="https://mkapi2.dfcfs.com/finskillshub/api/claw"
 
 # 可选：MCP 服务监听配置
 $env:MCP_HOST="127.0.0.1"
@@ -53,15 +51,20 @@ $env:MCP_LOG_LEVEL="INFO"   # DEBUG/INFO/WARNING/ERROR/CRITICAL
 $env:MCP_DEBUG="false"
 ```
 
-## 3. 本地运行（SSE 模式）
+## 3. 本地运行
 
 ```bash
+# SSE 模式（默认）
+eastmoney-mx-finance-mcp-server sse
+# 或省略参数
 eastmoney-mx-finance-mcp-server
-# 或
-python server.py
+
+# stdio 模式
+eastmoney-mx-finance-mcp-server stdio
 ```
 
-服务使用 `mcp.run(transport="sse")` 启动，默认监听 `127.0.0.1:8000`。
+- `sse`：HTTP/SSE 服务模式，默认监听 `127.0.0.1:8000`（可通过环境变量覆盖）。
+- `stdio`：标准输入输出模式，适合由 MCP 客户端直接拉起子进程。
 
 ## 4. 在 MCP Client 中配置示例
 
@@ -79,3 +82,5 @@ python server.py
 - `response`：API 原始返回
 - `success_hint`：`status` 或 `code` 为 `0` 时为 `true`
 - `error_hint`：命中已知错误码时返回可读提示
+
+
