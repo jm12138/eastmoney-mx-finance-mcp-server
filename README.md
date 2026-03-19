@@ -23,7 +23,6 @@
 ## 1. 安装
 
 ```bash
-cd C:/Users/Xpk22/Desktop/code/mx_mcp_server
 python -m venv .venv
 # Windows PowerShell
 .\.venv\Scripts\Activate.ps1
