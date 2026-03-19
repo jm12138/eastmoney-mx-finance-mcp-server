@@ -56,8 +56,6 @@ $env:MCP_DEBUG="false"
 ```bash
 # SSE 模式（默认）
 eastmoney-mx-finance-mcp-server sse
-# 或省略参数
-eastmoney-mx-finance-mcp-server
 
 # stdio 模式
 eastmoney-mx-finance-mcp-server stdio
