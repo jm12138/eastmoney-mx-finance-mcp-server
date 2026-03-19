@@ -1,6 +1,8 @@
 # eastmoney-mx-finance-mcp-server
 
-基于 [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) 实现的东方财富·妙想（MX）金融 MCP 服务端。
+基于 [modelcontextprotocol/python-sdk](https://github.com/modelcontextprotocol/python-sdk) 及 [东方财富·妙想Skills](https://clawhub.ai/u/QQK000) 实现的东方财富·妙想（MX）金融 MCP 服务端。
+
+
 
 ## 能力清单
 
