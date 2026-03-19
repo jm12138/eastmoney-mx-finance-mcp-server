@@ -135,6 +135,28 @@ def _build_error_response(
     }
 
 
+class UpstreamAPIError(RuntimeError):
+    def __init__(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        error_type: str,
+        message: str,
+        status_code: int | None = None,
+        response_text: str | None = None,
+    ) -> None:
+        self.details = _build_error_response(
+            url,
+            payload,
+            error_type=error_type,
+            message=message,
+            status_code=status_code,
+            response_text=response_text,
+        )
+        super().__init__(json.dumps(self.details, ensure_ascii=False))
+
+
 def _li_to_yuan(value: float | int) -> float:
     return round(float(value) / 1000.0, 3)
 
@@ -237,33 +259,33 @@ async def _post(path: str, payload: dict[str, Any] | None = None) -> dict[str, A
             response = await client.post(url, headers=headers, json=request_payload)
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        return _build_error_response(
+        raise UpstreamAPIError(
             url,
             request_payload,
             error_type="http_status_error",
             message=f"HTTP {exc.response.status_code} returned by upstream API.",
             status_code=exc.response.status_code,
             response_text=exc.response.text,
-        )
+        ) from exc
     except httpx.RequestError as exc:
-        return _build_error_response(
+        raise UpstreamAPIError(
             url,
             request_payload,
             error_type="request_error",
             message=f"Request to upstream API failed: {exc}",
-        )
+        ) from exc
 
     try:
         body = response.json()
-    except json.JSONDecodeError:
-        return _build_error_response(
+    except json.JSONDecodeError as exc:
+        raise UpstreamAPIError(
             url,
             request_payload,
             error_type="invalid_json",
             message="Upstream API returned a non-JSON response.",
             status_code=response.status_code,
             response_text=response.text,
-        )
+        ) from exc
 
     return _with_common_meta(url, request_payload, body)
 
@@ -495,7 +517,7 @@ async def mx_stock_simulator_summary() -> dict[str, Any]:
     返回：
     - balance_status / positions_status / error_hint
     - balance_money_fields / positions_money_fields（含 value_li 与 value_yuan）
-    - positions_overview
+    - positions_overview（若持仓接口返回业务错误，则 available=false 且聚合字段为 None）
     - raw（完整原始响应，便于二次解析）
     """
     balance_result, positions_result = await asyncio.gather(
@@ -503,7 +525,8 @@ async def mx_stock_simulator_summary() -> dict[str, Any]:
         _post("/mockTrading/positions", {}),
     )
 
-    position_rows = _find_data_list(positions_result.get("response", {}))
+    positions_ok = positions_result.get("success_hint") is True
+    position_rows = _find_data_list(positions_result.get("response", {})) if positions_ok else []
     total_market_value_li = 0.0
     total_profit_li = 0.0
     for row in position_rows:
@@ -532,20 +555,25 @@ async def mx_stock_simulator_summary() -> dict[str, Any]:
             }
         )
 
+    positions_overview = {
+        "available": positions_ok,
+        "position_count": len(position_rows) if positions_ok else None,
+        "total_market_value_li": total_market_value_li if positions_ok else None,
+        "total_market_value_yuan": _li_to_yuan(total_market_value_li) if positions_ok else None,
+        "total_profit_li": total_profit_li if positions_ok else None,
+        "total_profit_yuan": _li_to_yuan(total_profit_li) if positions_ok else None,
+        "top_positions": top_positions if positions_ok else None,
+    }
+    if not positions_ok:
+        positions_overview["error_hint"] = positions_result.get("error_hint")
+
     return {
         "balance_status": balance_result.get("success_hint"),
         "positions_status": positions_result.get("success_hint"),
         "error_hint": balance_result.get("error_hint") or positions_result.get("error_hint"),
         "balance_money_fields": _collect_money_candidates(balance_result.get("response", {})),
         "positions_money_fields": _collect_money_candidates(positions_result.get("response", {})),
-        "positions_overview": {
-            "position_count": len(position_rows),
-            "total_market_value_li": total_market_value_li,
-            "total_market_value_yuan": _li_to_yuan(total_market_value_li),
-            "total_profit_li": total_profit_li,
-            "total_profit_yuan": _li_to_yuan(total_profit_li),
-            "top_positions": top_positions,
-        },
+        "positions_overview": positions_overview,
         "raw": {
             "balance": balance_result,
             "positions": positions_result,

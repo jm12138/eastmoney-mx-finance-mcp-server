@@ -126,22 +126,17 @@ eastmoney-mx-finance-mcp-server sse
 
 - `endpoint`：实际调用 URL
 - `request`：请求体
-- `response`：上游 API 原始返回；若请求失败，则为结构化错误对象
+- `response`：上游 API 原始返回（适用于请求成功到达并拿到 JSON 响应的情况）
 - `success_hint`：当上游 `status` 或 `code` 为 `0` 时为 `true`
-- `error_hint`：已知错误码映射或网络/HTTP/解析错误提示
+- `error_hint`：已知错误码映射
 
-请求失败时，`response` 常见字段包括：
-
-- `error_type`：错误类型，如 `http_status_error` / `request_error` / `invalid_json`
-- `message`：错误说明
-- `status_code`：上游 HTTP 状态码（如有）
-- `response_text`：截断后的上游原始响应文本（如有）
+若发生上游 HTTP / 网络 / 非 JSON 响应等传输层失败，工具会直接抛出 MCP tool error，而不是返回 `success_hint=false` 的普通结果；错误消息中会附带结构化细节（包含 `error_type`、`message`、`status_code`、`response_text` 等字段），方便客户端按“调用失败”语义重试或中止。
 
 ## 6. 使用建议
 
 - `mx_stock_simulator_balance` / `mx_stock_simulator_positions` 返回中的金额字段通常是“厘”，可配合 `mx_amount_li_to_yuan` 使用。
 - 若持仓或委托数据中包含 `price` 与 `priceDec`，可用 `mx_price_restore` 还原真实价格。
-- `mx_stock_simulator_summary` 会并发拉取资金与持仓数据，并按持仓市值输出前 5 大持仓，更适合作为 Agent 的汇总入口。
+- `mx_stock_simulator_summary` 会并发拉取资金与持仓数据，并按持仓市值输出前 5 大持仓，更适合作为 Agent 的汇总入口。若持仓接口返回业务错误，`positions_overview.available` 会是 `false`，聚合字段会保留为 `null`，避免把上游失败误判为空仓。
 - `mx_select_stock` 与 `mx_stock_simulator_orders` 对分页参数做了边界检查：`pageNo >= 1`、`1 <= pageSize <= 100`。
 
 ## 7. 开发与检查
