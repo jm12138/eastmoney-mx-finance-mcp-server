@@ -1,0 +1,19 @@
+[project]
+name = "eastmoney-mx-finance-mcp-server"
+version = "0.2.1"
+description = "MCP server integrating 东方财富·妙想 (MX) financial skill APIs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp[cli]>=1.0.0",
+  "httpx>=0.27.0"
+]
+
+[project.scripts]
+eastmoney-mx-finance-mcp-server = "server:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
