@@ -1,6 +1,8 @@
+import asyncio
+import json
 import os
-import sys
 import re
+import sys
 from typing import Any
 
 import httpx
@@ -12,10 +14,11 @@ SERVER_VERSION = "0.2.1"
 SERVER_WEBSITE_URL = "https://marketing.dfcfs.com/views/finskillshub/indexIoMv0EzE"
 SERVER_INSTRUCTIONS = (
     "Eastmoney MX finance MCP server. "
-    "Version: 0.2.1. "
+    f"Version: {SERVER_VERSION}. "
     "Provides tools for MX news search, financial data query, stock screening, "
     "self-select management, and stock simulator workflows."
 )
+DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
 def _get_env_bool(key: str, default: bool = False) -> bool:
@@ -71,6 +74,8 @@ mcp = FastMCP(
     message_path=MCP_MESSAGE_PATH,
     streamable_http_path=MCP_STREAMABLE_HTTP_PATH,
 )
+
+
 def _get_apikey() -> str:
     apikey = os.getenv("MX_APIKEY")
     if not apikey:
@@ -101,6 +106,55 @@ def _with_common_meta(url: str, payload: dict[str, Any], body: dict[str, Any]) -
         "success_hint": code == 0,
         "error_hint": ERROR_HINTS.get(code),
     }
+
+
+def _build_error_response(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    error_type: str,
+    message: str,
+    status_code: int | None = None,
+    response_text: str | None = None,
+) -> dict[str, Any]:
+    error_body: dict[str, Any] = {
+        "error_type": error_type,
+        "message": message,
+    }
+    if status_code is not None:
+        error_body["status_code"] = status_code
+    if response_text:
+        error_body["response_text"] = response_text[:500]
+
+    return {
+        "endpoint": url,
+        "request": payload,
+        "response": error_body,
+        "success_hint": False,
+        "error_hint": message,
+    }
+
+
+class UpstreamAPIError(RuntimeError):
+    def __init__(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        error_type: str,
+        message: str,
+        status_code: int | None = None,
+        response_text: str | None = None,
+    ) -> None:
+        self.details = _build_error_response(
+            url,
+            payload,
+            error_type=error_type,
+            message=message,
+            status_code=status_code,
+            response_text=response_text,
+        )
+        super().__init__(json.dumps(self.details, ensure_ascii=False))
 
 
 def _li_to_yuan(value: float | int) -> float:
@@ -185,6 +239,13 @@ def _pick_value(row: dict[str, Any], keys: tuple[str, ...]) -> float:
     return 0.0
 
 
+def _validate_pagination(page_no: int, page_size: int) -> None:
+    if page_no < 1:
+        raise ValueError("pageNo must be >= 1")
+    if page_size < 1 or page_size > 100:
+        raise ValueError("pageSize must be between 1 and 100")
+
+
 async def _post(path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     request_payload = payload or {}
     url = f"{_get_base_url()}{path}"
@@ -193,10 +254,38 @@ async def _post(path: str, payload: dict[str, Any] | None = None) -> dict[str, A
         "apikey": _get_apikey(),
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(url, headers=headers, json=request_payload)
-        response.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, headers=headers, json=request_payload)
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise UpstreamAPIError(
+            url,
+            request_payload,
+            error_type="http_status_error",
+            message=f"HTTP {exc.response.status_code} returned by upstream API.",
+            status_code=exc.response.status_code,
+            response_text=exc.response.text,
+        ) from exc
+    except httpx.RequestError as exc:
+        raise UpstreamAPIError(
+            url,
+            request_payload,
+            error_type="request_error",
+            message=f"Request to upstream API failed: {exc}",
+        ) from exc
+
+    try:
         body = response.json()
+    except json.JSONDecodeError as exc:
+        raise UpstreamAPIError(
+            url,
+            request_payload,
+            error_type="invalid_json",
+            message="Upstream API returned a non-JSON response.",
+            status_code=response.status_code,
+            response_text=response.text,
+        ) from exc
 
     return _with_common_meta(url, request_payload, body)
 
@@ -257,10 +346,7 @@ async def mx_select_stock(keyword: str, pageNo: int = 1, pageSize: int = 20) -> 
     - 统一结构，原始结果在 response.data.data.result。
     - 常见核心字段：columns、dataList、responseConditionList、totalCondition。
     """
-    if pageNo < 1:
-        raise ValueError("pageNo must be >= 1")
-    if pageSize < 1 or pageSize > 100:
-        raise ValueError("pageSize must be between 1 and 100")
+    _validate_pagination(pageNo, pageSize)
 
     return await _post(
         "/stock-screen",
@@ -408,10 +494,7 @@ async def mx_stock_simulator_orders(
     - pageSize: 每页条数，范围 1~100。
     - includeHistory: 是否包含历史委托/成交记录。
     """
-    if pageNo < 1:
-        raise ValueError("pageNo must be >= 1")
-    if pageSize < 1 or pageSize > 100:
-        raise ValueError("pageSize must be between 1 and 100")
+    _validate_pagination(pageNo, pageSize)
 
     payload = {
         "pageNo": pageNo,
@@ -434,21 +517,30 @@ async def mx_stock_simulator_summary() -> dict[str, Any]:
     返回：
     - balance_status / positions_status / error_hint
     - balance_money_fields / positions_money_fields（含 value_li 与 value_yuan）
-    - positions_overview
+    - positions_overview（若持仓接口返回业务错误，则 available=false 且聚合字段为 None）
     - raw（完整原始响应，便于二次解析）
     """
-    balance_result = await _post("/mockTrading/balance", {})
-    positions_result = await _post("/mockTrading/positions", {})
+    balance_result, positions_result = await asyncio.gather(
+        _post("/mockTrading/balance", {}),
+        _post("/mockTrading/positions", {}),
+    )
 
-    position_rows = _find_data_list(positions_result.get("response", {}))
+    positions_ok = positions_result.get("success_hint") is True
+    position_rows = _find_data_list(positions_result.get("response", {})) if positions_ok else []
     total_market_value_li = 0.0
     total_profit_li = 0.0
     for row in position_rows:
         total_market_value_li += _pick_value(row, ("value", "marketValue", "positionValue"))
         total_profit_li += _pick_value(row, ("profit", "floatProfit", "profitAmount"))
 
+    sorted_rows = sorted(
+        position_rows,
+        key=lambda row: _pick_value(row, ("value", "marketValue", "positionValue")),
+        reverse=True,
+    )
+
     top_positions = []
-    for row in position_rows[:5]:
+    for row in sorted_rows[:5]:
         market_value_li = _pick_value(row, ("value", "marketValue", "positionValue"))
         profit_li = _pick_value(row, ("profit", "floatProfit", "profitAmount"))
         top_positions.append(
@@ -463,20 +555,25 @@ async def mx_stock_simulator_summary() -> dict[str, Any]:
             }
         )
 
+    positions_overview = {
+        "available": positions_ok,
+        "position_count": len(position_rows) if positions_ok else None,
+        "total_market_value_li": total_market_value_li if positions_ok else None,
+        "total_market_value_yuan": _li_to_yuan(total_market_value_li) if positions_ok else None,
+        "total_profit_li": total_profit_li if positions_ok else None,
+        "total_profit_yuan": _li_to_yuan(total_profit_li) if positions_ok else None,
+        "top_positions": top_positions if positions_ok else None,
+    }
+    if not positions_ok:
+        positions_overview["error_hint"] = positions_result.get("error_hint")
+
     return {
         "balance_status": balance_result.get("success_hint"),
         "positions_status": positions_result.get("success_hint"),
         "error_hint": balance_result.get("error_hint") or positions_result.get("error_hint"),
         "balance_money_fields": _collect_money_candidates(balance_result.get("response", {})),
         "positions_money_fields": _collect_money_candidates(positions_result.get("response", {})),
-        "positions_overview": {
-            "position_count": len(position_rows),
-            "total_market_value_li": total_market_value_li,
-            "total_market_value_yuan": _li_to_yuan(total_market_value_li),
-            "total_profit_li": total_profit_li,
-            "total_profit_yuan": _li_to_yuan(total_profit_li),
-            "top_positions": top_positions,
-        },
+        "positions_overview": positions_overview,
         "raw": {
             "balance": balance_result,
             "positions": positions_result,
@@ -528,8 +625,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
