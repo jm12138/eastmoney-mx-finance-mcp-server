@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -52,6 +53,13 @@ MCP_MESSAGE_PATH = os.getenv("MCP_MESSAGE_PATH", "/messages/")
 MCP_STREAMABLE_HTTP_PATH = os.getenv("MCP_STREAMABLE_HTTP_PATH", "/mcp")
 MCP_DEBUG = _get_env_bool("MCP_DEBUG", False)
 MCP_LOG_LEVEL = _get_env_log_level("INFO")
+
+logger = logging.getLogger(SERVER_NAME)
+logger.setLevel(getattr(logging, MCP_LOG_LEVEL))
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
 
 ERROR_HINTS = {
     113: "调用次数达到上限，请在妙想页面更新或升级 apikey。",
@@ -158,14 +166,17 @@ class UpstreamAPIError(RuntimeError):
 
 
 def _li_to_yuan(value: float | int) -> float:
+    """将厘单位金额转换为元（1 元 = 1000 厘）。"""
     return round(float(value) / 1000.0, 3)
 
 
 def _restore_price(price: float | int, price_dec: int) -> float:
+    """还原价格：真实价格 = price / 10^priceDec。"""
     return round(float(price) / (10**price_dec), price_dec)
 
 
 def _walk_json(node: Any, path: str = "") -> list[tuple[str, Any]]:
+    """递归遍历 JSON 树，返回所有叶子节点的 (路径, 值) 对。"""
     items: list[tuple[str, Any]] = []
     if isinstance(node, dict):
         for key, value in node.items():
@@ -181,6 +192,7 @@ def _walk_json(node: Any, path: str = "") -> list[tuple[str, Any]]:
 
 
 def _collect_money_candidates(node: Any) -> list[dict[str, Any]]:
+    """从 JSON 中提取常见金额字段，并返回厘/元双单位值。"""
     money_keys = {
         "totalAssets",
         "availableAssets",
@@ -215,23 +227,24 @@ def _collect_money_candidates(node: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def _find_data_list(node: Any) -> list[dict[str, Any]]:
+def _find_data_list(node: Any, max_depth: int = 20, _depth: int = 0) -> list[dict[str, Any]]:
+    """递归查找所有 dataList 字段并合并返回，限制最大深度防止无限递归。"""
+    if _depth > max_depth:
+        return []
+    results: list[dict[str, Any]] = []
     if isinstance(node, dict):
         for key, value in node.items():
             if key == "dataList" and isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-            found = _find_data_list(value)
-            if found:
-                return found
+                results.extend(item for item in value if isinstance(item, dict))
+            results.extend(_find_data_list(value, max_depth, _depth + 1))
     elif isinstance(node, list):
         for item in node:
-            found = _find_data_list(item)
-            if found:
-                return found
-    return []
+            results.extend(_find_data_list(item, max_depth, _depth + 1))
+    return results
 
 
 def _pick_value(row: dict[str, Any], keys: tuple[str, ...]) -> float:
+    """从字典中按优先级尝试获取数值，找不到返回 0.0。"""
     for key in keys:
         value = row.get(key)
         if isinstance(value, (int, float)):
@@ -240,6 +253,7 @@ def _pick_value(row: dict[str, Any], keys: tuple[str, ...]) -> float:
 
 
 def _validate_pagination(page_no: int, page_size: int) -> None:
+    """验证分页参数：pageNo >= 1，pageSize 在 1~100 之间。"""
     if page_no < 1:
         raise ValueError("pageNo must be >= 1")
     if page_size < 1 or page_size > 100:
@@ -254,11 +268,16 @@ async def _post(path: str, payload: dict[str, Any] | None = None) -> dict[str, A
         "apikey": _get_apikey(),
     }
 
+    logger.debug("POST %s with payload: %s", url, request_payload)
+
+    response = None
     try:
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
             response = await client.post(url, headers=headers, json=request_payload)
             response.raise_for_status()
+            body = response.json()
     except httpx.HTTPStatusError as exc:
+        logger.error("HTTP error %d from %s: %s", exc.response.status_code, url, exc.response.text[:200])
         raise UpstreamAPIError(
             url,
             request_payload,
@@ -268,25 +287,25 @@ async def _post(path: str, payload: dict[str, Any] | None = None) -> dict[str, A
             response_text=exc.response.text,
         ) from exc
     except httpx.RequestError as exc:
+        logger.error("Request error to %s: %s", url, exc)
         raise UpstreamAPIError(
             url,
             request_payload,
             error_type="request_error",
             message=f"Request to upstream API failed: {exc}",
         ) from exc
-
-    try:
-        body = response.json()
     except json.JSONDecodeError as exc:
+        logger.error("JSON decode error from %s: %s", url, exc)
         raise UpstreamAPIError(
             url,
             request_payload,
             error_type="invalid_json",
             message="Upstream API returned a non-JSON response.",
-            status_code=response.status_code,
-            response_text=response.text,
+            status_code=response.status_code if response else None,
+            response_text=response.text if response else None,
         ) from exc
 
+    logger.debug("Response from %s: success=%s", url, _extract_status_code(body) == 0)
     return _with_common_meta(url, request_payload, body)
 
 
@@ -379,7 +398,10 @@ async def mx_selfselect_manage(query: str) -> dict[str, Any]:
     返回：
     - 统一结构，具体执行结果在 response 中。
     """
-    return await _post("/self-select/manage", {"query": query})
+    if not query or not query.strip():
+        raise ValueError("query must be a non-empty string describing the operation.")
+
+    return await _post("/self-select/manage", {"query": query.strip()})
 
 
 @mcp.tool()
@@ -411,7 +433,7 @@ async def mx_stock_simulator_positions() -> dict[str, Any]:
 
 @mcp.tool()
 async def mx_stock_simulator_trade(
-    type: str,
+    trade_type: str,
     stockCode: str,
     quantity: int,
     useMarketPrice: bool = False,
@@ -420,7 +442,7 @@ async def mx_stock_simulator_trade(
     """模拟交易下单（mockTrading/trade）。
 
     参数：
-    - type: 交易方向，仅支持 `buy` / `sell`。
+    - trade_type: 交易方向，仅支持 `buy` / `sell`。
     - stockCode: 6 位 A 股代码，如 `600519`。
     - quantity: 委托数量，必须 > 0；买入时必须是 100 的整数倍。
     - useMarketPrice: 是否使用市价单。True 时忽略 price。
@@ -430,7 +452,7 @@ async def mx_stock_simulator_trade(
     - 统一结构，交易受理结果在 response 中。
     - 常见失败码：501（交易时段/余额/价格规则等）。
     """
-    action = type.lower().strip()
+    action = trade_type.lower().strip()
     if action not in {"buy", "sell"}:
         raise ValueError("type must be 'buy' or 'sell'")
 
@@ -565,7 +587,7 @@ async def mx_stock_simulator_summary() -> dict[str, Any]:
         "top_positions": top_positions if positions_ok else None,
     }
     if not positions_ok:
-        positions_overview["error_hint"] = positions_result.get("error_hint")
+        positions_overview["error_hint"] = positions_result.get("error_hint") or "持仓查询失败，未返回有效数据。"
 
     return {
         "balance_status": balance_result.get("success_hint"),
